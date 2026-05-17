@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"E:\\\\Data Field Study Material\\\\AI Projects\\\\venv\\\\Scripts\\\\python.exe\" -c \"import sys; print\\('Python:', sys.executable\\); import site; print\\('Site-packages:', site.getsitepackages\\(\\)\\)\")",
+      "Bash(python -c ' *)",
+      "PowerShell(& \"E:\\\\Data Field Study Material\\\\AI Projects\\\\venv\\\\Scripts\\\\python.exe\" -m pip install \"pytest>=7.4.0\" \"httpx>=0.24.0\")",
+      "Bash(python -m pytest tests/ -v)",
+      "PowerShell(& \"E:\\\\Data Field Study Material\\\\AI Projects\\\\venv\\\\Scripts\\\\python.exe\" -m pip install \"python-jose[cryptography]\" --quiet; Write-Host \"Exit: $LASTEXITCODE\")",
+      "PowerShell(New-Item -ItemType Directory -Force \"E:\\\\Data Field Study Material\\\\AI Projects\\\\RAG_ChatBot_1\\\\migrations\")",
+      "PowerShell(& \"E:\\\\Data Field Study Material\\\\AI Projects\\\\venv\\\\Scripts\\\\python.exe\" -m pytest \"E:\\\\Data Field Study Material\\\\AI Projects\\\\RAG_ChatBot_1\\\\tests\" -v 2>&1)",
+      "PowerShell(& \"E:\\\\Data Field Study Material\\\\AI Projects\\\\venv\\\\Scripts\\\\python.exe\" -c \"import jose; print\\('python-jose version:', jose.__version__\\)\")",
+      "PowerShell(& \"E:\\\\Data Field Study Material\\\\AI Projects\\\\venv\\\\Scripts\\\\python.exe\" -m pytest \"E:\\\\Data Field Study Material\\\\AI Projects\\\\RAG_ChatBot_1\\\\tests\" -v --tb=short 2>&1)",
+      "PowerShell(& \"E:\\\\Data Field Study Material\\\\AI Projects\\\\venv\\\\Scripts\\\\python.exe\" -m pip install \"PyJWT[crypto]\" --quiet; Write-Host \"Exit: $LASTEXITCODE\")"
+    ]
+  }
+}
