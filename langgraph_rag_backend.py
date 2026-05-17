@@ -396,9 +396,9 @@ chatbot = graph.compile(checkpointer=checkpointer)
 # These keep the same public API so frontend_rag.py needs minimal changes.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def create_thread_metadata(thread_id: str, title: str = "New Chat") -> None:
+def create_thread_metadata(thread_id: str, title: str = "New Chat", user_id: Optional[str] = None) -> None:
     """Create a thread row in Supabase.  Safe to call multiple times."""
-    db_service.create_thread(thread_id, title)
+    db_service.create_thread(thread_id, title, user_id=user_id)
 
 
 def update_thread_title(thread_id: str, title: str) -> None:
@@ -411,37 +411,13 @@ def get_thread_title(thread_id: str) -> str:
     return db_service.get_thread_title(thread_id)
 
 
-def get_all_threads_with_metadata() -> List[dict]:
+def get_all_threads_with_metadata(user_id: Optional[str] = None) -> List[dict]:
     """
     Return all threads ordered by last activity (updated_at DESC).
-
-    Primary source: Supabase threads table.
-    Fallback: if LangGraph checkpointer has thread IDs with no matching
-    thread row (e.g., data created before this migration), auto-register them.
+    Source: Supabase threads table (single query, no checkpoint scan).
+    When user_id is provided only that user's threads are returned.
     """
-    threads = db_service.get_all_threads()
-    existing_ids = {t["thread_id"] for t in threads}
-
-    try:
-        for checkpoint in checkpointer.list(None):
-            cp_thread_id = (checkpoint.config.get("configurable") or {}).get("thread_id")
-            if not cp_thread_id or cp_thread_id in existing_ids:
-                continue
-            tid = str(cp_thread_id)
-            db_service.create_thread(tid, "New Chat")
-            threads.append(
-                {
-                    "thread_id": tid,
-                    "chat_title": "New Chat",
-                    "created_at": None,
-                    "updated_at": None,
-                }
-            )
-            existing_ids.add(tid)
-    except Exception as e:
-        logger.warning("Could not scan LangGraph checkpoints: %s", e)
-
-    return threads
+    return db_service.get_all_threads(user_id=user_id)
 
 
 def generate_chat_title(first_message: str) -> str:

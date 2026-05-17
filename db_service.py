@@ -71,7 +71,7 @@ def get_thread_title(thread_id: str) -> str:
             .maybe_single()
             .execute()
         )
-        if response.data:
+        if response and response.data:
             return response.data.get("title") or "New Chat"
         return "New Chat"
     except Exception as e:

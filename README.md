@@ -48,11 +48,12 @@ This project started as a Streamlit + LangGraph prototype and was progressively 
 - **Request logging middleware** — Every request logged with a short request ID, method, path, status code, and latency
 - **Structured error handling** — Consistent JSON error responses for 401, 404, 415, 422, 500 via a central handler registry
 - **Comprehensive test suite** — 25 tests covering health, threads, chat, documents, and auth; service layer mocked so no real Supabase/LangGraph/OpenAI calls are needed
+- **Streamlit authentication UI** — Full login and signup forms with email/password; session stored in `st.session_state`; all chat history persists across logout/login via Supabase
+- **Docker packaging** — Multi-stage `Dockerfile` (python:3.13-slim, non-root user) + `docker-compose.yml` running FastAPI and Streamlit as separate services on a shared `.env` and volume
 
 ### Planned / Future Work
 
 - Streaming API responses (SSE / WebSocket) — Streamlit already streams via LangGraph; the FastAPI `/chat` endpoint currently returns a full response
-- Docker + docker-compose packaging
 - AWS deployment (ECS or App Runner)
 - React/Next.js web frontend to replace Streamlit
 - Rate limiting per user
@@ -223,7 +224,7 @@ RAG_ChatBot_1/
 │       └── document_service.py   # PDF upload + Pinecone ingestion orchestration
 │
 ├── langgraph_rag_backend.py      # Core LangGraph agent: graph, tools, checkpointer
-├── frontend_rag.py               # Streamlit chat UI
+├── frontend_rag.py               # Streamlit chat UI with login/signup auth gate
 ├── db_service.py                 # All Supabase table operations (thin CRUD layer)
 ├── supabase_client.py            # Supabase client singleton
 │
@@ -238,9 +239,15 @@ RAG_ChatBot_1/
 │   ├── test_auth.py              # Auth tests (real JWT validation, no mocks)
 │   └── __init__.py
 │
+├── Dockerfile                    # Multi-stage build: deps → runtime (non-root user)
+├── docker-compose.yml            # FastAPI + Streamlit services, shared .env + volume
+├── .dockerignore                 # Excludes .env, __pycache__, venv, uploads from context
+├── AUTH_ARCHITECTURE.md          # End-to-end auth system documentation (learning reference)
 ├── debug_token.py                # Dev utility: verify a Supabase JWT against JWKS
 ├── migrate_existing_threads.py   # One-time migration helper
 ├── requirements.txt
+├── .env.example                  # Safe template — copy to .env and fill in secrets
+├── .gitignore
 ├── uploads/                      # Temp storage directory (kept by .gitkeep)
 └── .env                          # Local secrets (never committed)
 ```
@@ -297,8 +304,10 @@ PINECONE_INDEX_NAME=rag-chatbot
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_KEY=eyJ...   # service role key (bypasses RLS)
 
-# Supabase — direct PostgreSQL connection (for LangGraph checkpointer)
-DATABASE_URL=postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
+# Supabase — PostgreSQL connection (for LangGraph checkpointer)
+# Local dev: use the direct connection from Dashboard → Settings → Database
+# Docker on Windows/Linux: use the Session Pooler URL (resolves to IPv4)
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
 
 # Supabase — JWT secret (stored in config but verification uses JWKS)
 SUPABASE_JWT_SECRET=your-jwt-secret   # Dashboard → Settings → API → JWT Settings
@@ -311,7 +320,7 @@ DEBUG=false
 
 **Where to find these values:**
 - `SUPABASE_URL` and `SUPABASE_KEY` — Supabase Dashboard → Project Settings → API
-- `DATABASE_URL` — Supabase Dashboard → Project Settings → Database → Connection string (use the direct connection, not the pooler)
+- `DATABASE_URL` — Supabase Dashboard → Project → Connect → Session Pooler (copy the connection string; replace `[YOUR-PASSWORD]` with your DB password). If your password contains `@`, URL-encode it as `%40`
 - `PINECONE_API_KEY` — Pinecone console → API Keys
 
 ### 5. Create the Supabase tables
@@ -369,7 +378,7 @@ In a separate terminal:
 streamlit run frontend_rag.py
 ```
 
-The Streamlit app connects directly to the LangGraph backend (not through FastAPI) and does not require authentication.
+The Streamlit app connects directly to the LangGraph backend (not through FastAPI). It has a built-in login/signup UI — sign in with the same Supabase email and password you use for the API. All chat history persists across sessions in Supabase.
 
 ---
 
@@ -382,7 +391,7 @@ The Streamlit app connects directly to the LangGraph backend (not through FastAP
 | `PINECONE_INDEX_NAME` | Yes | Name of your Pinecone index (1536 dimensions) |
 | `SUPABASE_URL` | Yes | Your Supabase project URL |
 | `SUPABASE_KEY` | Yes | Supabase service role key |
-| `DATABASE_URL` | Yes | Direct PostgreSQL connection string for LangGraph checkpointer |
+| `DATABASE_URL` | Yes | PostgreSQL connection string for LangGraph checkpointer (use Session Pooler URL for Docker) |
 | `SUPABASE_JWT_SECRET` | No | JWT secret (stored but JWKS is used for ES256 verification) |
 | `APP_HOST` | No | FastAPI bind host (default: `0.0.0.0`) |
 | `APP_PORT` | No | FastAPI port (default: `8000`) |
@@ -634,10 +643,6 @@ tests/test_auth.py         :: 5 passed
 
 ## Deployment
 
-### Current status
-
-The project runs locally. No cloud deployment exists yet.
-
 ### Running locally
 
 ```bash
@@ -648,13 +653,31 @@ uvicorn app.main:app --reload --port 8000
 streamlit run frontend_rag.py
 ```
 
-### Planned: Docker
+### Docker (docker-compose)
 
-A `docker-compose.yml` will package:
-- FastAPI service (uvicorn)
-- Streamlit service
+The project ships with a multi-stage `Dockerfile` and `docker-compose.yml` that run FastAPI and Streamlit as separate containers.
 
-Both share the same `.env` file and network. All external services (Pinecone, Supabase, OpenAI) are cloud-hosted and require only env vars.
+**Requirements:**
+- Docker Desktop installed and running
+- `.env` file in the project root (copy from `.env.example`)
+- `DATABASE_URL` must use the **Supabase Session Pooler** URL (not the direct connection) — Docker containers cannot reach IPv6 addresses and the direct connection resolves to IPv6
+
+```bash
+# Build and start both services
+docker compose up --build
+
+# Stop
+docker compose down
+```
+
+| Service | URL |
+|---|---|
+| FastAPI (Swagger UI) | http://localhost:8000/docs |
+| Streamlit chat UI | http://localhost:8501 |
+
+The Streamlit service waits for the FastAPI health check to pass before starting (`depends_on: condition: service_healthy`).
+
+Uploaded PDFs are stored in a shared `./uploads` volume so they survive container restarts.
 
 ### Planned: AWS
 
@@ -672,7 +695,6 @@ Target architecture:
 |---|---|
 | API | Streaming chat responses via Server-Sent Events (SSE) |
 | API | WebSocket support for real-time multi-turn conversations |
-| Infrastructure | Docker + docker-compose packaging |
 | Infrastructure | AWS deployment (ECS / App Runner) |
 | Infrastructure | CI/CD pipeline (GitHub Actions) |
 | Frontend | React/Next.js web app (replace Streamlit) |

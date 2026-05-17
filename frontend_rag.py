@@ -1,5 +1,7 @@
+import os
 import uuid
 
+import requests
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -17,6 +19,195 @@ from langgraph_rag_backend import (
     update_thread_title,
 )
 
+# =========================== Authentication ==============================
+# Supabase project URL and key are read from environment variables.
+# The service-role key is safe here because Streamlit runs server-side —
+# it is never sent to the browser.
+_SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+_SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+
+
+def _login_with_supabase(email: str, password: str) -> dict | None:
+    """
+    POST to Supabase Auth REST API with email + password.
+    Returns the full auth response dict on success, or None on failure.
+
+    Supabase returns: { access_token, user: { id, email, ... }, ... }
+    The access_token is an ES256-signed JWT — same token FastAPI verifies.
+    """
+    try:
+        resp = requests.post(
+            f"{_SUPABASE_URL}/auth/v1/token?grant_type=password",
+            json={"email": email, "password": password},
+            headers={"apikey": _SUPABASE_KEY, "Content-Type": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except requests.RequestException:
+        return None
+
+
+def _signup_with_supabase(email: str, password: str) -> dict:
+    """
+    POST to Supabase Auth signup endpoint to create a new user account.
+
+    Signup differs from login:
+      - Login:  user already exists → Supabase verifies password → returns JWT
+      - Signup: user does not exist → Supabase creates account → returns user object
+
+    Returns a result dict with keys:
+      { "status": "logged_in" | "confirm_email" | "error", "data": ..., "message": ... }
+
+    "logged_in"     — account created + session returned (email confirmation OFF in Supabase)
+    "confirm_email" — account created but awaiting email confirmation (confirmation ON)
+    "error"         — duplicate email, weak password, or network failure
+    """
+    try:
+        resp = requests.post(
+            f"{_SUPABASE_URL}/auth/v1/signup",
+            json={"email": email, "password": password},
+            headers={"apikey": _SUPABASE_KEY, "Content-Type": "application/json"},
+            timeout=10,
+        )
+        data = resp.json()
+
+        if resp.status_code == 200:
+            # Supabase returns access_token only when email confirmation is disabled.
+            if data.get("access_token"):
+                return {"status": "logged_in", "data": data}
+            # User created but must confirm email before logging in.
+            return {"status": "confirm_email", "data": data}
+
+        # Supabase returns error details in the "msg" field.
+        raw_msg = data.get("msg", data.get("message", "Signup failed."))
+
+        # Translate Supabase's internal messages into user-friendly ones.
+        if "already registered" in raw_msg.lower():
+            msg = "An account with this email already exists. Please sign in instead."
+        elif "password" in raw_msg.lower():
+            msg = "Password must be at least 6 characters long."
+        elif "invalid" in raw_msg.lower() and "email" in raw_msg.lower():
+            msg = "Please enter a valid email address."
+        else:
+            msg = raw_msg
+
+        return {"status": "error", "message": msg}
+
+    except requests.RequestException:
+        return {"status": "error", "message": "Network error. Please check your connection."}
+
+
+def _show_auth_page() -> None:
+    """
+    Combined authentication screen that renders either the login form or the
+    signup form depending on st.session_state["auth_mode"].
+
+    Mode switching works by changing auth_mode and calling st.rerun().
+    Streamlit reruns the script top-to-bottom on each interaction — the new
+    mode value in session_state is read immediately on the next run.
+
+    st.session_state persists for the browser tab's lifetime.
+    Closing the tab clears it — the user must log in again, but all their
+    conversation data remains permanently stored in Supabase.
+    """
+    st.title("🤖 DocChat — RAG Chatbot")
+    st.divider()
+
+    # Default to login screen if mode has not been set yet.
+    mode = st.session_state.get("auth_mode", "login")
+
+    # ── Login form ────────────────────────────────────────────────────────────
+    if mode == "login":
+        st.markdown("### Sign in")
+
+        with st.form("login_form"):
+            email = st.text_input("Email", placeholder="you@example.com")
+            password = st.text_input("Password", type="password", placeholder="••••••••")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
+
+        if submitted:
+            if not email or not password:
+                st.error("Please enter both email and password.")
+            else:
+                with st.spinner("Signing in…"):
+                    result = _login_with_supabase(email.strip(), password)
+
+                if result:
+                    st.session_state["token"] = result["access_token"]
+                    st.session_state["user_id"] = result["user"]["id"]
+                    st.session_state["user_email"] = result["user"]["email"]
+                    st.rerun()  # gate passes on next run
+                else:
+                    st.error("Invalid email or password. Please try again.")
+
+        st.markdown("---")
+        st.markdown("Don't have an account?")
+        if st.button("Create account", use_container_width=True):
+            st.session_state["auth_mode"] = "signup"
+            st.rerun()
+
+    # ── Signup form ───────────────────────────────────────────────────────────
+    else:
+        st.markdown("### Create account")
+
+        with st.form("signup_form"):
+            email = st.text_input("Email", placeholder="you@example.com")
+            password = st.text_input("Password", type="password", placeholder="Min. 6 characters")
+            confirm = st.text_input("Confirm password", type="password", placeholder="Re-enter password")
+            submitted = st.form_submit_button("Create account", use_container_width=True)
+
+        if submitted:
+            # Client-side validation before hitting Supabase.
+            if not email or not password or not confirm:
+                st.error("All fields are required.")
+            elif len(password) < 6:
+                st.error("Password must be at least 6 characters long.")
+            elif password != confirm:
+                st.error("Passwords do not match.")
+            else:
+                with st.spinner("Creating your account…"):
+                    result = _signup_with_supabase(email.strip(), password)
+
+                if result["status"] == "logged_in":
+                    # Email confirmation is disabled in Supabase — account created
+                    # and session returned in one step. Auto-login the user.
+                    data = result["data"]
+                    st.session_state["token"] = data["access_token"]
+                    st.session_state["user_id"] = data["user"]["id"]
+                    st.session_state["user_email"] = data["user"]["email"]
+                    st.success("Account created! Welcome.")
+                    st.rerun()
+
+                elif result["status"] == "confirm_email":
+                    # Supabase sent a confirmation email. User must verify before
+                    # they can log in. Switch to login screen with a hint.
+                    st.success("Account created! Check your email to confirm, then sign in.")
+                    st.session_state["auth_mode"] = "login"
+                    st.rerun()
+
+                else:
+                    st.error(result["message"])
+
+        st.markdown("---")
+        st.markdown("Already have an account?")
+        if st.button("Back to sign in", use_container_width=True):
+            st.session_state["auth_mode"] = "login"
+            st.rerun()
+
+
+# ── Authentication gate ───────────────────────────────────────────────────────
+# If no token in session_state, show the auth page and stop script execution.
+# Nothing below this block runs for unauthenticated users.
+if "token" not in st.session_state:
+    _show_auth_page()
+    st.stop()
+
+# From here: user is authenticated.
+# These values are safe to read on every rerun.
+_user_id: str = st.session_state["user_id"]
+_user_email: str = st.session_state["user_email"]
 
 # =========================== Message Rendering ===========================
 def render_message(message, role=None):
@@ -66,10 +257,10 @@ def generate_thread_id():
 
 
 def reset_chat():
-    """Create a new chat thread."""
+    """Create a new chat thread owned by the current user."""
     thread_id = generate_thread_id()
     st.session_state["thread_id"] = thread_id
-    create_thread_metadata(thread_id, "New Chat")
+    create_thread_metadata(thread_id, "New Chat", user_id=st.session_state.get("user_id"))
     st.session_state["message_history"] = []
     st.session_state["title_generated"] = False
 
@@ -104,7 +295,7 @@ if "message_history" not in st.session_state:
 if "thread_id" not in st.session_state:
     thread_id = generate_thread_id()
     st.session_state["thread_id"] = thread_id
-    create_thread_metadata(thread_id, "New Chat")
+    create_thread_metadata(thread_id, "New Chat", user_id=st.session_state.get("user_id"))
 
 if "title_generated" not in st.session_state:
     st.session_state["title_generated"] = False
@@ -121,6 +312,14 @@ current_title = get_thread_title(thread_key)
 
 # ============================ Sidebar ============================
 st.sidebar.title("🤖 LangGraph PDF Chatbot")
+
+# ── User identity + logout ────────────────────────────────────────────────────
+st.sidebar.caption(f"Signed in as **{_user_email}**")
+if st.sidebar.button("Sign out", use_container_width=True):
+    # Clear all session state — the gate will show the login page on next rerun.
+    st.session_state.clear()
+    st.rerun()
+st.sidebar.divider()
 
 # Display current chat title
 st.sidebar.markdown(f"**Current Chat:** {current_title}")
@@ -174,7 +373,7 @@ if uploaded_pdf:
 st.sidebar.divider()
 st.sidebar.subheader("💬 Conversations")
 
-threads_with_metadata = get_all_threads_with_metadata()
+threads_with_metadata = get_all_threads_with_metadata(user_id=_user_id)
 
 if not threads_with_metadata:
     st.sidebar.write("No past conversations yet.")
