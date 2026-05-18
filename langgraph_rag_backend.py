@@ -3,12 +3,11 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-import time
-from datetime import datetime
-from typing import Annotated, Any, Dict, List, Optional, TypedDict, cast
+from datetime import datetime, timezone
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 import psycopg
-from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
@@ -23,7 +22,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 import requests
 
 # Pinecone imports
-from pinecone import Pinecone, ServerlessSpec
+from pinecone import Pinecone
 from langchain_pinecone import PineconeVectorStore
 
 # Supabase DB service (application-level tables)
@@ -141,7 +140,7 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
         )
         chunks = splitter.split_documents(docs)
 
-        upload_timestamp = datetime.utcnow().isoformat()
+        upload_timestamp = datetime.now(timezone.utc).isoformat()
         filename_to_use = filename or os.path.basename(temp_path)
 
         texts, metadatas, ids = [], [], []
@@ -345,36 +344,51 @@ def chat_node(state: ChatState, config=None):
 tool_node = ToolNode(tools)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. PostgreSQL Checkpointer  (replaces SqliteSaver)
+# 7. PostgreSQL Connection Pool + LangGraph Checkpointer
 #
-# LangGraph manages its own tables (checkpoints, checkpoint_blobs,
-# checkpoint_writes, checkpoint_migrations) inside the same Supabase
-# PostgreSQL database.  These are separate from our application tables.
+# WHY a pool instead of a single psycopg.connect():
+#   A bare psycopg.Connection created at module-import time becomes a stale
+#   global object whenever the server closes the TCP connection (idle timeout,
+#   container restart, or Supabase session-pooler eviction).  Streamlit reruns
+#   reuse the same module globals, so every subsequent rerun hits
+#   "psycopg.OperationalError: the connection is closed" with no recovery.
 #
-# DATABASE_URL must be the direct PostgreSQL connection string:
-#   postgresql://postgres:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres
-# Find it in: Supabase Dashboard → Settings → Database → Connection string
+#   ConnectionPool solves this by:
+#     • Checking connections are alive before handing them out
+#     • Discarding and replacing dead connections automatically
+#     • Keeping min_size=1 warm connection ready so first-use latency is low
+#
+# LangGraph PostgresSaver (langgraph-checkpoint-postgres >= 2.0.0) accepts
+# a ConnectionPool directly — no wrapper needed.
+#
+# DATABASE_URL must be the Supabase Session Pooler connection string:
+#   postgresql://postgres.<ref>:<password>@<host>.pooler.supabase.com:5432/postgres
+# Find it in: Supabase Dashboard → Project → Connect → Session Pooler
+# (The session pooler URL resolves to IPv4 — required inside Docker on Windows.)
 #
 # prepare_threshold=0 disables server-side prepared statements — required
-# when connecting through Supabase's PgBouncer pooler (safe to keep for
-# direct connections too).
+# when connecting through pgBouncer / Supabase session pooler.
 # ─────────────────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError(
         "DATABASE_URL is missing from environment variables. "
-        "Add the direct PostgreSQL connection string from Supabase → Settings → Database."
+        "Set it to the Supabase Session Pooler connection string."
     )
 
 try:
-    _raw = psycopg.connect(DATABASE_URL, autocommit=True, prepare_threshold=0)
-    _raw.row_factory = dict_row  # type: ignore[assignment]
-    _pg_conn = cast(psycopg.Connection[DictRow], _raw)
-    checkpointer = PostgresSaver(_pg_conn)
+    _pg_pool = ConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
+        open=True,  # open connections immediately so startup failure is obvious
+    )
+    checkpointer = PostgresSaver(_pg_pool)
     checkpointer.setup()  # Creates LangGraph checkpoint tables if they don't exist yet
-    print("✅ Connected to PostgreSQL (Supabase) for LangGraph checkpoints")
+    print("✅ PostgreSQL connection pool ready (Supabase) for LangGraph checkpoints")
 except Exception as e:
-    print(f"❌ Failed to connect to PostgreSQL for checkpoints: {e}")
+    print(f"❌ Failed to create PostgreSQL connection pool: {e}")
     raise
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -566,11 +580,13 @@ def delete_thread_completely(thread_id: str) -> dict:
 
     # 2. Delete LangGraph checkpoint rows from PostgreSQL
     #    LangGraph uses thread_id as TEXT across three tables.
+    #    _pg_pool.connection() checks out a healthy connection from the pool
+    #    and returns it automatically — reconnect-safe.
     try:
-        with _pg_conn.cursor() as cur:
-            cur.execute("DELETE FROM checkpoints        WHERE thread_id = %s", (thread_id,))
-            cur.execute("DELETE FROM checkpoint_blobs   WHERE thread_id = %s", (thread_id,))
-            cur.execute("DELETE FROM checkpoint_writes  WHERE thread_id = %s", (thread_id,))
+        with _pg_pool.connection() as conn:
+            conn.execute("DELETE FROM checkpoints       WHERE thread_id = %s", (thread_id,))
+            conn.execute("DELETE FROM checkpoint_blobs  WHERE thread_id = %s", (thread_id,))
+            conn.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,))
         results["deleted"]["checkpoints"] = True
         print(f"✅ Deleted LangGraph checkpoints for thread: {thread_id}")
     except Exception as e:

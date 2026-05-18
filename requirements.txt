@@ -15,6 +15,7 @@ supabase>=2.3.0
 # Database — PostgreSQL checkpointer for LangGraph conversation state
 langgraph-checkpoint-postgres>=2.0.0
 psycopg[binary]>=3.1.0
+psycopg-pool>=3.1.0
 
 # Document Processing
 pypdf>=3.17.0
