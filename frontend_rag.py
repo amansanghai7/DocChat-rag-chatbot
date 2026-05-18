@@ -522,38 +522,39 @@ if user_input:
 
     # Stream assistant response
     with st.chat_message("assistant"):
-        status_holder = {"box": None}
+        # Pre-reserve a slot ABOVE the streamed text for the tool status badge.
+        # IMPORTANT: we must not call any st.* functions inside the generator
+        # passed to st.write_stream(). Doing so triggers an implicit Streamlit
+        # rerun mid-stream, which clears user_input (already consumed by
+        # st.chat_input) so the title-generation block is never reached.
+        tool_status_slot = st.empty()
+        tool_calls_made: list[str] = []
 
         def ai_only_stream():
-            """Stream only AI message content, handle tool messages separately."""
             for message_chunk, _ in chatbot.stream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=CONFIG,
                 stream_mode="messages",
             ):
                 if isinstance(message_chunk, ToolMessage):
-                    tool_name = getattr(message_chunk, "name", "tool")
-                    if status_holder["box"] is None:
-                        status_holder["box"] = st.status(
-                            f"🔧 Using `{tool_name}` …", expanded=True
-                        )
-                    else:
-                        status_holder["box"].update(
-                            label=f"🔧 Using `{tool_name}` …",
-                            state="running",
-                            expanded=True,
-                        )
+                    # Collect tool names — no st.* calls here
+                    tool_calls_made.append(getattr(message_chunk, "name", "tool"))
 
                 if isinstance(message_chunk, AIMessage) and message_chunk.content:
                     yield message_chunk.content
 
-        # Stream and render with markdown
-        ai_message = st.write_stream(ai_only_stream())
+        raw_output = st.write_stream(ai_only_stream())
 
-        if status_holder["box"] is not None:
-            status_holder["box"].update(
-                label="✅ Tool execution complete", state="complete", expanded=False
-            )
+        # After streaming: fill the pre-reserved slot with the tool status badge
+        if tool_calls_made:
+            with tool_status_slot.status("✅ Tool execution complete", state="complete"):
+                for name in tool_calls_made:
+                    st.caption(f"🔧 {name}")
+        else:
+            tool_status_slot.empty()
+
+    # Normalize write_stream output to a plain string (guard for edge cases)
+    ai_message = raw_output if isinstance(raw_output, str) else ""
 
     # Save assistant message
     st.session_state["message_history"].append(
@@ -568,7 +569,6 @@ if user_input:
         new_title = generate_chat_title(user_input)
         update_thread_title(thread_key, new_title)
         st.session_state["title_generated"] = True
-        # Rerun to update sidebar with new title
         st.rerun()
 
     # Show document metadata if available
