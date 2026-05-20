@@ -522,12 +522,16 @@ if user_input:
 
     # Stream assistant response
     with st.chat_message("assistant"):
-        # Pre-reserve a slot ABOVE the streamed text for the tool status badge.
-        # IMPORTANT: we must not call any st.* functions inside the generator
-        # passed to st.write_stream(). Doing so triggers an implicit Streamlit
-        # rerun mid-stream, which clears user_input (already consumed by
-        # st.chat_input) so the title-generation block is never reached.
-        tool_status_slot = st.empty()
+        # Rule: zero st.* calls inside the generator passed to write_stream.
+        # Any st.* call inside the generator triggers an implicit Streamlit
+        # rerun, which clears user_input so the title-generation block after
+        # this with-block is never reached.
+        # Rule: zero st.* calls after write_stream inside this with-block.
+        # Calling st.empty().empty() or st.status() after write_stream also
+        # triggers a re-render that can fire an implicit rerun for the same
+        # reason (observed to break title generation for non-tool responses).
+        # Solution: collect tool names during streaming (no widget side-effects),
+        # then render tool status in a SEPARATE with-block after this one.
         tool_calls_made: list[str] = []
 
         def ai_only_stream():
@@ -537,21 +541,19 @@ if user_input:
                 stream_mode="messages",
             ):
                 if isinstance(message_chunk, ToolMessage):
-                    # Collect tool names — no st.* calls here
                     tool_calls_made.append(getattr(message_chunk, "name", "tool"))
-
                 if isinstance(message_chunk, AIMessage) and message_chunk.content:
                     yield message_chunk.content
 
         raw_output = st.write_stream(ai_only_stream())
 
-        # After streaming: fill the pre-reserved slot with the tool status badge
-        if tool_calls_made:
-            with tool_status_slot.status("✅ Tool execution complete", state="complete"):
+    # Tool status is rendered OUTSIDE the assistant chat_message block so that
+    # no widget calls happen inside the streaming context.
+    if tool_calls_made:
+        with st.chat_message("assistant"):
+            with st.status("✅ Tool execution complete", state="complete"):
                 for name in tool_calls_made:
                     st.caption(f"🔧 {name}")
-        else:
-            tool_status_slot.empty()
 
     # Normalize write_stream output to a plain string (guard for edge cases)
     ai_message = raw_output if isinstance(raw_output, str) else ""

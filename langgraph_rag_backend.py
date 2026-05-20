@@ -453,7 +453,17 @@ def generate_chat_title(first_message: str) -> str:
             "Title:"
         )
         response = title_llm.invoke(prompt)
-        title = response.content.strip().strip('"').strip("'")
+        # AIMessage.content is str | list[str | dict] in LangChain.
+        # When the model returns multi-part content it comes back as a list;
+        # calling .strip() on a list raises AttributeError and silently falls
+        # through to the word-truncation fallback below.  Normalise to str first.
+        raw = response.content
+        if isinstance(raw, list):
+            raw = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw
+            )
+        title = str(raw).strip().strip('"').strip("'")
 
         if not title or len(title) > 60:
             words = first_message.split()[:6]
