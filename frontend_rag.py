@@ -12,7 +12,6 @@ from langgraph_rag_backend import (
     delete_thread_completely,
     generate_chat_title,
     get_all_threads_with_metadata,
-    get_pinecone_stats,
     get_thread_title,
     ingest_pdf,
     thread_document_metadata,
@@ -311,7 +310,7 @@ thread_docs = st.session_state["ingested_docs"].setdefault(thread_key, {})
 current_title = get_thread_title(thread_key)
 
 # ============================ Sidebar ============================
-st.sidebar.title("🤖 LangGraph PDF Chatbot")
+st.sidebar.title("DocChat- A RAG Chatbot")
 
 # ── User identity + logout ────────────────────────────────────────────────────
 st.sidebar.caption(f"Signed in as **{_user_email}**")
@@ -323,20 +322,6 @@ st.sidebar.divider()
 
 # Display current chat title
 st.sidebar.markdown(f"**Current Chat:** {current_title}")
-st.sidebar.caption(f"Thread ID: `{thread_key[:8]}...`")
-
-# Pinecone status (optional, can be collapsed)
-with st.sidebar.expander("📊 Pinecone Status", expanded=False):
-    try:
-        stats = get_pinecone_stats()
-        if "error" not in stats:
-            st.metric("Total Vectors", stats.get("total_vector_count", 0))
-            st.metric("Active Threads", len(stats.get("namespaces", {})))
-            st.caption(f"Index Fullness: {stats.get('index_fullness', 0):.2%}")
-        else:
-            st.error(f"Error: {stats['error']}")
-    except Exception as e:
-        st.warning(f"Could not fetch Pinecone stats: {e}")
 
 if st.sidebar.button("➕ New Chat", use_container_width=True):
     reset_chat()
@@ -489,7 +474,7 @@ else:
                 st.rerun()
 
 # ============================ Main Layout ========================
-st.title("💬 Multi Utility Chatbot")
+st.title("Chat")
 st.caption("Ask questions about your documents or use built-in tools")
 
 # Display chat history with proper rendering
